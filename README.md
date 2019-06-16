@@ -2,9 +2,9 @@
 
 Sergi Sayols Puig, Holger Klein
 
-Computational Biology Group
+Computational Biology Group, Boehringer Ingelheim Pharma GmbH & Co KG
 
-(c) 2016-2019, Boehringer Ingelheim Pharma GmbH & Co KG
+(c) 2016-2019
 
 License: GPL v3 (see LICENSE)
 
