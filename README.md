@@ -1,9 +1,13 @@
 # Riboswitches pipeline
 
 Sergi Sayols Puig, Holger Klein
+
 Computational Biology Group
+
 (c) 2016-2019, Boehringer Ingelheim Pharma GmbH & Co KG
+
 License: GPL v3 (see LICENSE)
+
 
 
 
