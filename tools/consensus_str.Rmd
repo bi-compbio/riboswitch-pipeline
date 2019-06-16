@@ -1,0 +1,180 @@
+---
+title: "Consensus structure of the network communities"
+author: ""
+date: "`r format(Sys.time(), '%d %B %Y')`"
+params:
+  conf: "/data/cbprojectarchive/NGS_Riboswitch_655_Twister_Tet_screen13_RBB_2017/reports/report.conf"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    css: report.css
+---
+
+```{r setup, include=FALSE}
+options(stringsAsFactors=FALSE)
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	cache = FALSE
+)
+library(png)
+source("report.helpers.R")
+loadGlobalVars(params$conf)
+```
+
+### Load the results of the project
+
+The DGE results and counts matrix are saved in `report.Rmd` in the file `r paste0(RESULTS, "/edger_objects.RData")`.
+
+```{r LoadDEresults}
+load(file=paste0(RESULTS, "/edger_objects.RData"))
+```
+
+### Read RNAfold data
+
+Read the folding information from the ViennaRNA package:
+
+```{r readRNAfold}
+rnafold <- read.delim(paste0(RNAFOLD_OUT, "/rnafold.txt"), head=F)
+rnafold$riboswitch <- gsub("^>(.+):([actgACTG]+)$", "\\1", rnafold$V1)
+rnafold$switch     <- toupper(gsub("^>(.+):([actgACTG]+)$", "\\2", rnafold$V1))
+rnafold$V4         <- gsub("[\\(\\)]", "", rnafold$V4)
+#rnafold <- split(rnafold[, -1], rnafold$riboswitch)
+```
+
+
+### Network analysis {.tabset .tabset-fade .tabset-pills}
+
+Redo the network analysis as in `report.Rmd`.
+
+```{r network, results='asis'}
+# retrieve the sequences for each pattern+contrast
+s <- lapply(res, function(res.pattern) {
+  lapply(res.pattern$LRT, function(res.pattern.contrast) {
+    i <- res.pattern.contrast$table$FDR < .01
+    data.frame(sequence=rownames(res.pattern.contrast$table)[i],
+               logFC=res.pattern.contrast$table$logFC[i])
+  })
+})
+s <- melt(s)
+s$rnafold_key <- paste0(">", s$L1, ":", tolower(sub("_", "", s$sequence)))
+s$full_sequence <- toupper(rnafold$V2[match(s$rnafold_key, rnafold$V1)])
+
+# R> head(s)
+#   sequence variable     value                          L2         L1
+# 1  ACC_GGA    logFC 0.2739700 thiamine_100nM_vs_untreated TPP_TYPE_I
+# 2  ACG_GGC    logFC 0.2161517 thiamine_100nM_vs_untreated TPP_TYPE_I
+# 3  ACT_AGT    logFC 0.3819934 thiamine_100nM_vs_untreated TPP_TYPE_I
+# 4  ATG_GGT    logFC 0.2323451 thiamine_100nM_vs_untreated TPP_TYPE_I
+# 5  CAA_ACG    logFC 0.2935073 thiamine_100nM_vs_untreated TPP_TYPE_I
+# 6  CCA_GGC    logFC 0.2187850 thiamine_100nM_vs_untreated TPP_TYPE_I
+```
+
+Calculate the network based on sequence distances and plot
+
+```{r network2, results='asis'}
+invisible({
+  constructs <- split(s, s$L1)
+  Map(constructs, names(constructs), f=function(x, construct.name) {
+    cat("\n\n#### ", construct.name, " {.tabset}\n\n")
+    treatments <- split(x, x$L2)
+    Map(treatments, names(treatments), f=function(x, treatment.name) {
+      cat("\n\n##### ", treatment.name, " {.tabset}\n\n")
+      plot.net.edger.results(x$sequence, x$value, main="", sub="significant motifs at FDR 1%")
+
+      if(length(x$sequence) < 2) {
+        cat("less than 2 significantly enriched sequences")
+        return()
+      }
+
+      # recalculate graph + communities as in plot.net.edger.results()
+      d <- hamming(x$sequence)
+      am <- ifelse(d == 1, 1, 0) # remove distant sequences and autoreferences
+      if(all(am == 0)) {
+        cat("there are no edges between vertices")
+        return()
+      }
+      net <- graph_from_adjacency_matrix(am, mode="undirected")
+      ceb <- cluster_edge_betweenness(net) 
+      ceb.communities <- communities(ceb)
+
+      # annotate the sequences with the community they belong to
+      comm <- do.call(rbind, Map(ceb.communities, names(ceb.communities), f=function(x, x.name) data.frame(community=x.name, sequence=x)))
+      x$community <- comm$community[match(x$sequence, comm$sequence)]
+
+      # calculate avg FC of communities
+      avg.fc <- tapply(x$value, x$comm, mean)
+
+      # pick max and min communities 
+      comm.max <- names(avg.fc)[which.max(avg.fc)]
+      comm.min <- names(avg.fc)[which.min(avg.fc)]
+      dir.create(paste0(RESULTS, "/network_community_folds/"), showWarnings=FALSE)
+      file.suff <- paste0(RESULTS, "/network_community_folds/", construct.name, "_", treatment.name)
+      write.csv(x[x$community == comm.max, ], paste0(file.suff, "_max.csv"))
+      write.csv(x[x$community == comm.min, ], paste0(file.suff, "_min.csv"))
+
+      # do MSA if 2+ seq (ClustalW), and predict secondary struct with RNA(ali)fold
+      pred <- function(sequences, sequences.name, file.suff) {
+        if(file.exists(paste0(file.suff, ".fa"))) {
+          file.remove(paste0(file.suff, ".fa"))
+        }
+        invisible(
+          Map(sequences, sequences.name, f=function(x, x.name) {
+            cat(">", x.name, file=paste0(file.suff, ".fa"), sep="", fill=TRUE, append=TRUE)
+            cat(x, file=paste0(file.suff, ".fa"), sep="", fill=TRUE, append=TRUE)
+          })
+        )
+
+        if(length(sequences) > 1) {
+          x <- system(paste0("~/bin/clustalw-2.1/clustalw2 -ALIGN -INFILE=", paste0(file.suff, ".fa")), intern=TRUE)
+          x <- system(paste0("ml LocARNA ",
+                             " && RNAalifold --color ", file.suff, ".aln", " > ", file.suff, ".mfe",
+                             " && ps2pdf alirna.ps ", file.suff, ".pdf",
+                             " && pdftopng ", file.suff, ".pdf ", file.suff,
+                             " && rm alirna.ps"),
+                      intern=TRUE)
+        } else {
+          x <- system(paste0("ml LocARNA ",
+                             " && RNAfold -i ", file.suff, ".fa", " --id-prefix=rna.ps > ", file.suff, ".mfe",
+                             " && ps2pdf rna.ps_0001_ss.ps ", file.suff, ".pdf",
+                             " && pdftopng ", file.suff, ".pdf ", file.suff,
+                             " && rm rna.ps_0001_ss.ps"),
+                      intern=TRUE)
+        }
+        x <- system(paste0("pdftopng ", file.suff, ".pdf ", file.suff), intern=TRUE)
+      }
+
+      pred(x$full_sequence[x$community == comm.max], x$sequence[x$community == comm.max], paste0(file.suff, "_max"))
+      pred(x$full_sequence[x$community == comm.min], x$sequence[x$community == comm.min], paste0(file.suff, "_min"))
+
+      # read the resulting PNG and plot
+      cols <- c("sequence", "variable", "value", "L2", "L1")
+      cat("\n\n###### Max upregulated community (plot)\n\n")
+      cat(paste0(file.suff, "_max-000001.png"), fill=TRUE)
+      plot(0:1, 0:1, type="n", ann=FALSE, axes=FALSE)
+      rasterImage(readPNG(paste0(file.suff, "_max-000001.png")), 0, 0, 1, 1)
+      cat("\n\n###### Max upregulated community (table)\n\n")
+      cat(knitr::kable(x[x$community == comm.max, cols], format="markdown"), sep="\n")
+      cat("\n\n###### Min downregulated community (plot)\n\n")
+      cat(paste0(file.suff, "_min-000001.png"), fill=TRUE)
+      plot(0:1, 0:1, type="n", ann=FALSE, axes=FALSE)
+      rasterImage(readPNG(paste0(file.suff, "_min-000001.png")), 0, 0, 1, 1)
+      cat("\n\n###### Min downregulated community (table)\n\n")
+      cat(knitr::kable(x[x$community == comm.min, cols], format="markdown"), sep="\n")
+    })
+  })
+})
+```
+
+## Analysis Environment Log
+
+* Analysis directory for current report: `r getwd()`
+* Compilation time of knitr report: `r Sys.time()`
+
+```{r sessionData, include=T}
+sessionInfo()
+```
+

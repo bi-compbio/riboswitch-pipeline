@@ -1,0 +1,4 @@
+FASTQC_VERSION="0.11.5-Java-1.8.0_74"
+Bioconductor_VERSION="3.4-foss-2015a"
+LOCARNA_VERSION="1.9.2"
+pandoc_VERSION="1.19.2.3"

@@ -1,0 +1,22 @@
+=head2 Wed Jul  5 18:40:18 2017: C<Module> L<JSON|JSON>
+
+=over 4
+
+=item *
+
+C<installed into: /home/sayolspu/src/Riboswitches_pipeline/deps/JSON-2.94/share/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 2.94>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+

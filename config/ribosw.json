@@ -1,0 +1,200 @@
+{
+  "Patterns":
+  [
+    {
+      "Name": "Orig",
+      "RE"  : "GATTC([ACGT]{5})AAAAC.{37}CACCT([ACGT]{2})TACAT"
+    },
+    {
+      "Name": "TypI",
+      "RE"  : "([ACGT]{5})AAAAC.{37}CACCT([ACGT]{2})"
+    },
+    {
+      "Name": "TypII",
+      "RE"  : "GATTC([ACGT]{5})TCGGG.{62}GGGAT([ACGT]{2})TACAT"
+    },
+    {
+      "Name": "Spikein1",
+      "RE"  : "AGTTGT"
+    },
+    {
+      "Name": "Spikein2",
+      "RE"  : "TCAACA"
+    }
+  ],
+  "Amplicons":
+  [
+    {
+      "Name": "Orig",
+      "Wildcard": "n",
+      "Amplicon": "cattgcagcgtattcccagtcccaaacaaacaaaggccggcatggtcccagcctcctcgctggcgccggctgggcaatgctataatcgcgtggatatggcacgcaagnnnnnaccgggcaccgtaaatgtccgnntagtagcgaatgggacgcacaaatctctctagcaaacaaacaaagcctggtgaaattgttatccgct"
+    }
+  ],
+  "UseSpikein": "Spikein1",
+  "ModelMatrix": "~ treatment + 0",
+  "Contrasts":
+  [
+    {
+      "Name"  : "tetracyclyne_30uM_vs_untreated",
+      "groupA": "treatmenttetracycline_30uM",
+      "groupB": "treatmentuntreated"
+    },
+    {
+      "Name"  : "tetracyclyne_100uM_vs_untreated",
+      "groupA": "treatmenttetracycline_100uM",
+      "groupB": "treatmentuntreated"
+    },
+    {
+      "Name"  : "tetracyclyne_100uM_vs_tetracycline_30uM",
+      "groupA": "treatmenttetracycline_100uM",
+      "groupB": "treatmenttetracycline_30uM"
+    }
+  ],
+  "Targets" :
+  [
+    {
+      "projectID" : "531",
+      "sampleID"  : "1",
+      "sampleName": "S1",
+      "group"     : "HEK293",
+      "treatment" : "untreated",
+      "subject"   : "1",
+      "filePrefix": "531_1_S1_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "2",
+      "sampleName": "S2",
+      "group"     : "HEK293",
+      "treatment" : "untreated",
+      "subject"   : "2",
+      "filePrefix": "531_2_S2_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "3",
+      "sampleName": "S3",
+      "group"     : "HEK293",
+      "treatment" : "untreated",
+      "subject"   : "3",
+      "filePrefix": "531_3_S3_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "4",
+      "sampleName": "S4",
+      "group"     : "HEK293",
+      "treatment" : "untreated",
+      "subject"   : "4",
+      "filePrefix": "531_4_S4_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "5",
+      "sampleName": "S5",
+      "group"     : "HEK293",
+      "treatment" : "untreated",
+      "subject"   : "5",
+      "filePrefix": "531_5_S5_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "6",
+      "sampleName": "S6",
+      "group"     : "HEK293",
+      "treatment" : "tetracycline_30uM",
+      "subject"   : "1",
+      "filePrefix": "531_6_S6_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "7",
+      "sampleName": "S7",
+      "group"     : "HEK293",
+      "treatment" : "tetracycline_30uM",
+      "subject"   : "2",
+      "filePrefix": "531_7_S7_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "8",
+      "sampleName": "S8",
+      "group"     : "HEK293",
+      "treatment" : "tetracycline_30uM",
+      "subject"   : "3",
+      "filePrefix": "531_8_S8_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "9",
+      "sampleName": "S9",
+      "group"     : "HEK293",
+      "treatment" : "tetracycline_30uM",
+      "subject"   : "4",
+      "filePrefix": "531_9_S9_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "10",
+      "sampleName": "S10",
+      "group"     : "HEK293",
+      "treatment" : "tetracycline_30uM",
+      "subject"   : "5",
+      "filePrefix": "531_10_S10_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "11",
+      "sampleName": "S11",
+      "group"     : "HEK293",
+      "treatment" : "tetracycline_100uM",
+      "subject"   : "1",
+      "filePrefix": "531_11_S11_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "12",
+      "sampleName": "S12",
+      "group"     : "HEK293",
+      "treatment" : "tetracycline_100uM",
+      "subject"   : "2",
+      "filePrefix": "531_12_S12_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "13",
+      "sampleName": "S13",
+      "group"     : "HEK293",
+      "treatment" : "tetracycline_100uM",
+      "subject"   : "3",
+      "filePrefix": "531_13_S13_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "14",
+      "sampleName": "S14",
+      "group"     : "HEK293",
+      "treatment" : "tetracycline_100uM",
+      "subject"   : "4",
+      "filePrefix": "531_14_S14_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "15",
+      "sampleName": "S15",
+      "group"     : "HEK293",
+      "treatment" : "tetracycline_100uM",
+      "subject"   : "5",
+      "filePrefix": "531_15_S15_R1_001"
+    },
+    {
+      "projectID" : "531",
+      "sampleID"  : "16",
+      "sampleName": "S16",
+      "group"     : "HEK293",
+      "treatment" : "mock",
+      "subject"   : "1",
+      "filePrefix": "531_16_S16_R1_001"
+    }
+  ]
+}

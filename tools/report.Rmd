@@ -1,0 +1,752 @@
+---
+title: "REPORT_PROJECT"
+author: ""
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    css: report.css
+---
+
+```{r setup, include=FALSE}
+
+options(stringsAsFactors=FALSE)
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	cache = FALSE
+)
+source("report.helpers.R")
+loadGlobalVars()
+```
+
+## Project Info
+
+### Background
+
+BACKGROUND + AIM FROM PROJECT DOCUMENT
+
+### Amplicons + Patterns
+
+#### Amplicons
+
+Amplicon:
+
+```
+5' cattgcagcgtattcccagtcccaaacaaacaaatctccttcggtacatccagctgatgagtcccaaataggacga
+aacactataatcgcgtggatatggcacgcaagnnnnnaccgggcaccgtaaatgtccgnntattgtcctggattccacg
+aaggagacaaacaaacaaagcctggtgaaattgttatccgct 3'
+```
+
+Stuffer control spike-in to be detected:
+
+```
+5' cattgcagcgtattcccagtccggaaggaagggagaaattggaatgttttaactgcagccctcagaactttagtaa
+cagcacaacaaattaaaaacaaaaacaactcatgccacagtatgtcgtcttcatgtgtcttgcaatgaactgtttcagt
+agccaatcctctttctgcctggtgaaattgttatccgct 3'
+```
+
+#### Theoretical diversity
+
+* Amplicon: 4^x = xxx constructs. 
+
+#### Patterns
+
+```{r patterns, results='asis'}
+patterns <- getPatternsFromConfig(RIBOSW_CFG)
+for(i in seq_along(patterns)) {
+  cat("* ", names(patterns)[i], ": ", patterns[i], sep="", fill=TRUE)
+}
+```
+
+### Data location
+
+* Demultiplexed data from flowcell located in `/data/ngsarchive/FlowCells/flowcell535_0151_170825/FASTQ/618_Riboswitch-Screen6_Kreuz_RBB-2017/`
+* raw data for R analysis located below working directory in raw\_data. Raw data generated from fastq files using the [Riboswitches pipeline](https://git.eu.boehringer.com/bibc_compbio/Riboswitches_pipeline).
+
+Samples, groups and contrasts definitions:
+
+```{r data_import}
+# load targets
+targets <- getTargetsFromConfig(RIBOSW_CFG)
+kable(targets)
+
+# create the model matrix from the formula provided
+EDGER_MMATRIX <- getMMatrixFromConfig(RIBOSW_CFG)
+design <- model.matrix(as.formula(EDGER_MMATRIX), data=targets)
+rownames(design) <- targets$sampleName
+kable(design)
+
+# load contrasts
+conts.df <- getContrastsFromConfig(RIBOSW_CFG)
+conts <- makeContrasts(contrasts=conts.df$x, levels=design)
+colnames(conts) <- gsub("\\s*=.+", "", conts.df$x)
+kable(conts)
+```
+
+### Total matches per library
+
+Stats from the fastq_processor's, summarizing total matches per pattern in all samples:
+
+```{r stats_import}
+# read stats
+stats <- lapply(targets$filePrefix, function(f) {
+  read.delim(paste0(FASTQ_PROCESSOR_RIBOSW_OUT, "/", f, "_stats.txt"), head=F)
+})
+stats <- Reduce(function(x, y) merge(x, y, by=1), stats)
+rownames(stats) <- sub(":$", "", stats$V1)
+stats <- stats[, -1]
+colnames(stats) <- targets$sampleName
+
+# nicely show them in a table
+unmatched <- grep("^unmatched$", rownames(stats))
+total <- grep("^total$", rownames(stats))
+stats <- rbind(stats[c(-unmatched, -total), ], stats[c(unmatched, total), ])  # place these 2 cols in the end
+DT::datatable(t(stats), options=list(searching=FALSE, pageLength=25))
+```
+
+### Raw counts
+
+The matrix summarizing the raw counts from all target samples from this project is located at `r paste0(RESULTS, "/counts_raw.xlsx")`.
+
+```{r rawCounts}
+# read counts files
+counts <- lapply(targets$filePrefix, function(f) {
+  read.delim(paste0(FASTQ_PROCESSOR_RIBOSW_OUT, "/", f, "_counts.txt"), head=F)
+})
+names(counts) <- targets$sampleName
+
+# transform the data structure into a list(patternName)->matrix(key=VRL+VRS, S1_counts=counts, ...)
+counts <- melt(counts, id.vars=c("V2", "V3", "V4"))  # patternName, VRL, VRS
+counts$L1 <- factor(counts$L1, levels=targets$sampleName) # VERY IMPORTANT! put the columns back in their original order (design matrix)
+counts <- lapply(split(counts, counts$V2), function(x) {
+  x <- dcast(x, V3 + V4 ~ L1)
+  rownames(x) <- apply(x[, c("V3", "V4")], 1, paste, collapse="_")
+  counts <- as.matrix(x[, -1:-2])
+  counts <- ifelse(is.na(counts), 0, counts)
+})
+
+# save the raw counts table
+out <- lapply(counts, function(x) as.data.frame(x))
+WriteXLS(out, ExcelFileName=paste0(RESULTS, "/counts_raw.xlsx"), row.names=TRUE)
+```
+
+## Differential Expression Analysis with edgeR
+
+### Hard normalization with spike-in controls {.tabset .tabset-fade .tabset-pills}
+
+If a positive control construct that should express costant levels of mRNA independent of the presence or not of Tetracycline was included in this study, this sequence might be used to normalize for fluctuations in transfection efficiency and as a reference for 100% expression.
+
+First attempt: calculate scaling factors for the count matrix based on the number of Spikein counts:
+
+```{r spikeinNorm, results='asis'}
+EDGER_SPIKEIN <- getSpikeinFromConfig(RIBOSW_CFG)
+patterns      <- getPatternsFromConfig(RIBOSW_CFG)
+
+if(EDGER_SPIKEIN %in% names(patterns)) {
+  cat("Will use", getSpikeinFromConfig(RIBOSW_CFG), "for normalization.\n")
+  
+  # read stats and get spikein counts
+  spikeins <- apply(stats[paste(EDGER_SPIKEIN, c("forward", "reverse")), ], 2, sum)
+  hard.factor <- as.numeric(1 / scale(spikeins, center=F))
+
+  # normalize by spike-in
+  counts.spikein <- Map(function(counts, patternName) {
+    round(t(t(counts) * hard.factor))
+  }, counts, names(counts))
+  
+  # normalize by libsize (counts per million)
+  counts.libsize <- Map(function(counts, patternName) {
+    patternTotal <- apply(stats[grepl(paste0("^", patternName, " (forward|reverse)"), rownames(stats)), ], 2, sum)
+    round(t(t(counts) * 1e6 / patternTotal))
+  }, counts, names(counts))
+  
+  # and compare (plot)
+  invisible(
+    Map(function(counts.spikein, counts.libsize, patternName) {
+      df.spikein <- melt(counts.spikein)
+      df.libsize <- melt(counts.libsize)
+      df <- merge(df.spikein, df.libsize, by=c("Var1", "Var2")) # merge by VRL_VRS and sampleName
+      df <- lapply(split(df, df$Var2), function(df) {
+        df$density <- get.density(log2(df$value.x + .25), log2(df$value.y + .25)) # add pseudocount
+        df
+      })
+      df <- do.call(rbind, df)
+  
+      p <- ggplot(df, aes(x=log2(value.x + .25), y=log2(value.y + .25), color=density)) +
+            geom_point(alpha=.5) +
+            geom_abline(intercept=0, slope=1, color="red") +
+            scale_color_viridis() +
+            xlab("log2 spike-in normalized counts") +
+            ylab("log2 pattern matches normalized counts") +
+            theme_bw() +
+            facet_wrap(~ Var2)
+      cat("\n\n#### ", patternName, "\n\n")
+      print(p)
+    }, counts.spikein, counts.libsize, names(counts))
+  )
+  
+  # from here on, work with the spike-in normalized counts
+  counts <- counts.spikein
+} else {
+  cat("Won't use any spike-in for normalization\n")
+}
+```
+
+### Normalization and differential abundance {.tabset .tabset-fade .tabset-pills}
+
+Pairwise differential analysis of abundance was done with [edgeR](http://bioconductor.org/packages/release/bioc/html/edgeR.html). Provided are interactive volcano plots comparing the fold changes (log-scaled) with the significance level of the observed differences.
+
+```{r normalizationAndDE, results='asis'}
+res <- Map(function(counts, patternName) {
+
+  # DGE and compute effective library size estimation by TMM normalization
+  conds  <- sapply(colnames(targets), grepl, EDGER_MMATRIX)	# total number of factors in the formula (~0+A+A:B or ~group)
+  if(sum(conds) == 1) {
+    y <- DGEList(counts=counts, group=as.factor(targets[, conds]))
+  } else {
+  	y <- DGEList(counts=counts)
+  }
+  y <- calcNormFactors(y)
+
+  # calculate dispersion. Distinguish the case when we have no replicates
+  if(all(apply(design, 2, sum) == 1)) {
+    y <- estimateGLMCommonDisp(y, method="deviance", robust=TRUE, subset=NULL)
+    y$design <- design
+  } else {
+    y <- estimateDisp(y, design)
+  }
+  
+  # call DE (fit model and likelihood ratio test)
+  fit <- glmFit(y, design)	# fit model
+  lrt <- apply(conts, 2, function(cont) {
+    x <- glmLRT(fit, contrast=cont)
+    x$table$FDR <- p.adjust(x$table$PValue, method="fdr")
+    x$table$PIscore <- PIscore(x$table$FDR, x$table$logFC)$score
+    x
+  })
+  names(lrt) <- colnames(conts)
+
+  # volcano with the results
+  df <- do.call(rbind, Map(function(x, name) {
+    out <- x$table[, c("logFC", "FDR", "PIscore")]
+    out$logFDR   <- -log10(out$FDR)
+    out$label    <- rownames(out)
+    out$contrast <- name
+    out$density  <- get.density(out$logFC, out$logFDR)
+    out$hilite   <- abs(out$logFDR) >= abs(out$logFDR)[rev(order(abs(out$logFDR)))][10] # highlight top 10
+    if(sum(out$hilite) > 100) out$hilite <- FALSE
+    out$significance <- factor(ifelse(abs(out$PIscore) > 2  , "FC=2, FDR 1%",
+                               ifelse(abs(out$PIscore) > 1.3, "FC=2, FDR 5%", "lower")),
+                               levels=c("FC=2, FDR 1%", "FC=2, FDR 5%", "lower"))
+    out
+  }, lrt, names(lrt)))
+  rownames(df) <- NULL
+  
+  # do the plot
+  p <- ggplot(df, aes(x=logFC, y=logFDR, FDR=FDR, label=label, color=significance)) +
+    geom_point(alpha=.5) +
+    geom_text_repel(data=subset(df, hilite), color="black", size=1.5) +
+    scale_color_manual("significance\nequivalence", values=c("#EF3B2C", "#67000D", "#00000010"), drop=FALSE) +
+    xlab("log2 FC") +
+    ylab("-log10 FDR") +
+    theme_bw() +
+    facet_wrap(~ contrast, ncol=3)
+  
+  # return normalized counts and test stats
+  list(DGEList=y, LRT=lrt, plot=p)
+}, counts, names(counts))
+
+# print the plots
+invisible(Map(function(x, patternName) {
+  cat("\n\n#### ", patternName, "\n\n")
+  print(x$plot)
+}, res, names(res)))
+```
+
+Read the folding information from the ViennaRNA package:
+
+```{r readRNAfold}
+rnafold <- read.delim(paste0(RNAFOLD_OUT, "/rnafold.txt"), head=F)
+rnafold$riboswitch <- gsub("^>(.+):([actgACTG]+)$", "\\1", rnafold$V1)
+rnafold$switch     <- toupper(gsub("^>(.+):([actgACTG]+)$", "\\2", rnafold$V1))
+rnafold$V4         <- gsub("[\\(\\)]", "", rnafold$V4)
+rnafold <- split(rnafold[, -1], rnafold$riboswitch)
+```
+
+The matrix summarizing the differential abundance analysis results from all contrasts is located at `r paste0(RESULTS, "/edger_de_results.xlsx")`.
+
+The full data set containing the edgeR object and differential abundance results is located at `r paste0(RESULTS, "/edger_objects.RData")`.
+
+```{r saveDEresults}
+out.de <- Map(function(x, riboswitch) {
+  y <- Map(function(y, cont){
+    lrt <- y$table
+    colnames(lrt) <- paste(cont, colnames(lrt), sep=".")
+    lrt$switch <- rownames(lrt)
+    lrt
+  }, x$LRT, names(x$LRT))
+  y <- Reduce(function(x, y) merge(x, y, by="switch"), y)
+  y$RNAfold <- rnafold[[riboswitch]]$V3[match(gsub("[^actgACTG]", "", y$switch), rnafold[[riboswitch]]$switch)]
+  y$MFE     <- rnafold[[riboswitch]]$V4[match(gsub("[^actgACTG]", "", y$switch), rnafold[[riboswitch]]$switch)]
+  y
+}, res, names(res))
+
+WriteXLS(out.de, ExcelFileName=paste0(RESULTS, "/edger_de_results.xlsx"))
+save(res, file=paste0(RESULTS, "/edger_objects.RData"))
+```
+
+The matrix summarizing the counts per million normalized counts from all target samples from this project is located at `r paste0(RESULTS, "/counts_norm.xlsx")`. This numbers are generated with `edgeR::cpm(y)`.
+
+```{r saveNormalizedCounts}
+out.counts <- lapply(res, function(x) as.data.frame(cpm(x$DGEList)))
+WriteXLS(out.counts, ExcelFileName=paste0(RESULTS, "/counts_norm.xlsx"), row.names=TRUE)
+```
+
+A joint matrix summarizing *everything* is located at `r paste0(RESULTS, "/counts+results.xlsx")`. The GC% is added at the end.
+
+```{r saveEverything}
+# first, merge DE results and counts per pattern
+out.de.counts <- Map(function(de, counts, pattern) {
+  x    <- merge(de, counts, by.x="switch", by.y=0, all=TRUE)
+  colnames(x) <- paste(pattern, colnames(x))
+  x
+}, out.de, out.counts, names(out.de))
+
+# now, merge by "switch" (AAAAAA_AA) the de+counts tables from all patterns
+# the "switch" column is the first in all data.frames
+out.de.counts <- Reduce(function(x, y) merge(x, y, by=1, all=TRUE), out.de.counts)
+out.de.counts$GC <- sapply(out.de.counts[, 1], function(x) seqinr::GC(unlist(strsplit(x, ""))))
+
+WriteXLS(out.de.counts, ExcelFileName=paste0(RESULTS, "/counts+results.xlsx"), row.names=TRUE)
+```
+
+### MA-plots {.tabset .tabset-fade .tabset-pills}
+
+MA plots summarize the pvalues and fold changes versus the counts.
+
+```{r MAplots, results='asis'}
+ma <- Map(function(x, patternName) {
+
+  # MA-plots data structure
+  df <- do.call(rbind, Map(function(x, name) {
+    out <- x$table[, c("logFC", "FDR", "logCPM")]
+    out$logFDR   <- -log10(out$FDR)
+    out$label    <- rownames(out)
+    out$contrast <- name
+    out$density.fc  <- get.density(out$logCPM, out$logFC)
+    out$density.fdr <- get.density(out$logCPM, out$logFDR)
+    out$hilite.fc   <- abs(out$logFC)   >= abs(out$logFC )[rev(order(abs(out$logFC )))][10] # highlight top 10
+    out$hilite.fdr  <- abs(out$logFDR)  >= abs(out$logFDR)[rev(order(abs(out$logFDR)))][10]
+    if(sum(out$hilite.fc ) > 100) out$hilite.fc  <- FALSE
+    if(sum(out$hilite.fdr) > 100) out$hilite.fdr <- FALSE
+    out
+  }, x$LRT, names(x$LRT)))
+  rownames(df) <- NULL
+  
+  # do the FC plot
+  p.fc <- ggplot(df, aes(x=logCPM, y=logFC, label=label, color=density.fc)) +
+    geom_point(alpha=.5) +
+    geom_text_repel(data=subset(df, hilite.fc), color="black", size=1.5) +
+    scale_color_viridis() +
+    xlab("mean of normalized counts") +
+    ylab("log2 FC") +
+    theme_bw() +
+    facet_wrap(~ contrast, ncol=3)
+  
+  # do the FDR plot
+  p.fdr <- ggplot(df, aes(x=logCPM, y=logFDR, label=label, color=density.fdr)) +
+    geom_point(alpha=.5) +
+    geom_text_repel(data=subset(df, hilite.fdr), color="black", size=1.5) +
+    scale_color_viridis() +
+    xlab("mean of normalized counts") +
+    ylab("-log10 FDR") +
+    theme_bw() +
+    facet_wrap(~ contrast, ncol=3)
+  
+  # return normalized counts and test stats
+  list(plot.fc=p.fc, plot.fdr=p.fdr)
+}, res, names(res))
+
+# print the plots
+invisible(Map(function(x, patternName) {
+  cat("\n\n#### ", patternName, " {.tabset}\n\n")
+  cat("\n\n##### FC\n\n")
+  print(x$plot.fc )
+  cat("\n\n##### FDR\n\n")
+  print(x$plot.fdr)
+}, ma, names(ma)))
+```
+
+### Summary of differential abundance {.tabset .tabset-fade .tabset-pills}
+
+Statistics table showing the number of hits fulfilling the following criteria:
+
+```{r summaryDE, results='asis'}
+invisible(
+  Map(function(x, patternName) {
+  
+    cat("\n\n#### ", patternName, " {.tabset}\n\n")
+  
+    # get FDR cutoff summary
+    cat("\n\n##### FDR cutoffs\n\n")
+    s.fdr <- sapply(x$LRT, function(x) {
+      c(`Survivors`      =sum(x$table$FDR < .01),
+        `(logFC >0) =ON` =sum(x$table$FDR < .01 & x$table$logFC > 0),
+        `(logFC <0) =OFF`=sum(x$table$FDR < .01 & x$table$logFC < 0))
+    })
+    cat(kable(t(s.fdr)), "\n", fill=TRUE)
+  
+    # get FC cutoff summary
+    cat("\n\n##### logFC cutoffs\n\n")
+    s.fc <- sapply(x$LRT, function(x) {
+      c(`Survivors`      =sum(abs(x$table$logFC) > .5),
+        `(logFC >0) =ON` =sum(x$table$logFC >  0.5),
+        `(logFC <0) =OFF`=sum(x$table$logFC < -0.5))
+    })
+    cat(kable(t(s.fc)), "\n", fill=TRUE)
+  
+    # combined
+    cat("\n\n##### FDR + logFC combined\n\n")
+    s.combined <- sapply(x$LRT, function(x) {
+      c(`Survivors`      =sum(x$table$FDR < .01 & abs(x$table$logFC) > .5),
+        `(logFC >0) =ON` =sum(x$table$FDR < .01 & x$table$logFC >  0.5),
+        `(logFC <0) =OFF`=sum(x$table$FDR < .01 & x$table$logFC < -0.5))
+    })
+    cat(kable(t(s.combined)), "\n", fill=TRUE)
+  }, res, names(res))
+)
+```
+
+### Top candidates of each contrast {.tabset .tabset-fade .tabset-pills}
+
+The top 10 list of each contrast based on 1% FDR cutoffs. For each sequence show logFC bars over all contrasts. This would help to identify:
+
+* whether there are interesting cadidates,
+* whether there are dose-response effects, and
+* whether the changes are consistent over the different experimental doses.
+
+```{r summaryDE2, results='asis'}
+invisible(
+  Map(function(x, patternName) {
+    cat("\n\n#### ", patternName, " {.tabset}\n\n")
+
+    Map(function(y, contrastName) {
+      cat("\n\n##### ", contrastName, "\n\n")
+  
+      ##
+      ## Summary table
+      ##
+      # get the top 10 patterns
+      i <- order(y$table$FDR)[1:10]
+      i <- i[y$table$FDR[i] < .01]       # from the top 10, discard any not DE
+      
+      # make a table with information about FC on other contrasts
+      top.patterns <- rownames(y$table)[i]
+      df <- as.data.frame(do.call(cbind, lapply(x$LRT, function(x) x$table[top.patterns, "logFC"])))
+      df$pattern_ <- top.patterns
+      df <- df[, c(grep("^pattern_", colnames(df)), grep("^pattern_", colnames(df), invert=TRUE))]
+      colnames(df) <- paste(sub("^pattern_", patternName, colnames(df)), "switch")
+  
+      # format and print the summary table
+      my_color_bar <- function() {  # function based on formattable::color_bar
+        formatter("span", style=function(x) style(display="inline-block",
+                                                  direction="rtl",
+                                                  `background-color`=ifelse(x > 0, csscolor("lightgreen"), csscolor("lightpink")),
+                                                  `border-radius`="4px",
+                                                  `padding-right`="2px",
+                                                  width=percent(abs(x) / max(abs(x)))))
+      }
+      if(nrow(df) > 0) {
+        cat(as.character(formattable(df, list(area(col=2:ncol(df)) ~ my_color_bar()))), fill=TRUE)
+      } else {
+        cat("\n\nNo significant results.\n\n")
+      }
+
+      ##
+      ## Quantification boxplots
+      ##
+      if(nrow(df) > 0) {
+        xcounts <- cpm(x$DGEList)  # normalize counts
+        xcounts <- melt(xcounts[top.patterns, , drop=FALSE])
+
+        # get the group from the model matrix (take the first term of the formula)
+        i <- names(unlist(sapply(colnames(targets), function(x) grep(x, EDGER_MMATRIX))))[1]
+        xcounts$group <- targets[, i][match(xcounts$Var2, targets$sampleName)]
+        xcounts$group <- factor(xcounts$group, levels=unique(xcounts$group))  # keep order
+
+        # aggregate data and plot
+        p <- ggplot(xcounts, aes(x=Var1, y=value, fill=group)) +
+          geom_boxplot() +
+          scale_fill_brewer(palette = "Set1") +
+          xlab("") + ylab("") +
+          theme_bw() +
+          theme(axis.text.x=element_blank(), axis.ticks.x=element_blank())
+        print(p)
+      }
+    }, x$LRT, names(x$LRT))
+  }, res, names(res))
+)
+```
+
+### Sample relatedness {.tabset .tabset-fade .tabset-pills}
+
+Based on normalized counts of all variants, naively explore the aggregation of samples. Take the 50 most variable variants, and plot the first 2 components of a PCA. Color based on the first "group" column found in the model matrix.
+
+```{r samplePCA, results='asis'}
+opar <- par(mfrow=c(1, 2))
+
+invisible(
+  Map(function(x, patternName) {
+    cat("\n\n#### ", patternName, "\n\n")
+  
+    counts <- cpm(x$DGEList)  # normalized counts
+  
+    # sort variants by variance, and do the pca taking the top 50
+    v <- apply(counts, 1, sd)
+    x <- prcomp(t(counts[rev(order(v))[1:50], ]))
+    dev <- x$sdev / sum(x$sdev)
+    
+    # get the groups to color based on the model matrix
+    i <- names(unlist(sapply(colnames(targets), function(x) grep(x, EDGER_MMATRIX))))[1]
+    groups <- targets[, i][match(rownames(x$x), targets$sampleName)]
+    groups <- factor(groups, levels=groups[!duplicated(groups)])  # keep order
+    col <- viridis(length(levels(groups)))[groups]
+  
+    # plot the first two components
+    plot(x$x[, 1], x$x[, 2], type="n", #main=patternName,
+         xlab=paste0("PC1 (", round(100 * dev[1]), "% var)"),
+         ylab=paste0("PC2 (", round(100 * dev[2]), "% var)"))
+    points(x$x[, 1], x$x[, 2], cex=1/3, pch=16, col=col)
+    text(x$x[, 1], x$x[, 2], labels=rownames(x$x), col=col)
+    
+    # cluster samples and plot
+    h <- hclust(dist(t(counts[rev(order(v))[1:50], ])))
+    tryCatch({
+      plot(h, xlab="Euclidean distances of the top 50 variants") # only plot if >2 samples
+    }, error=function(e){
+      cat("No clustering if 2 or less samples")
+    })
+  }, res, names(res))
+)
+
+par(opar)
+```
+
+### Compare FC of defined contrasts {.tabset .tabset-fade .tabset-pills}
+
+Fold changes of the different contrast are presented pairwise, in order to detect common patterns between different experiments.
+
+<sub>NOTE: a fraction of the least significant points were removed from the plots to improve interactivity.</sub>
+
+```{r compareFC, results='asis'}
+invisible(
+  Map(function(lrt, patternName) {
+    cat("\n\n#### ", patternName, "\n\n")
+
+    # get FC from all different contrats
+    x <- do.call(cbind, lapply(lrt$LRT, function(x) x$table[rownames(lrt$LRT[[1]]$table), "logFC"]))
+    colnames(x) <- names(lrt$LRT)
+    rownames(x) <- rownames(lrt$LRT[[1]]$table)
+    
+    # do the plot (only if there're more than 2 contrasts to compre
+    if(ncol(x) >= 2) {
+      pairs(x, #main=paste("Pattern", patternName),
+            panel=panel.smooth.dens, diag.panel=panel.hist, pch=16, col="#00000050")
+    }
+  }, res, names(res))
+)
+```
+
+### Group medians across conditions {.tabset .tabset-fade .tabset-pills}
+
+Using the TMM normalized counts, compare the median log2 counts per condition in the design matrix:
+
+```{r groupMedian, results='asis'}
+invisible(
+  Map(function(lrt, patternName) {
+    cat("\n\n#### ", patternName, "\n\n")
+
+    # calculate medians per groups
+    medians <- apply(lrt$DGEList$design, 2, function(samples) {
+      apply(cpm(lrt$DGEList)[, as.logical(samples), drop=FALSE], 1, median)
+    })
+    
+    # and plot
+    tryCatch({
+      pairs(log2(medians), #main=paste("Pattern", patternName),
+            panel=panel.smooth.dens, diag.panel=panel.hist, pch=16, col="#00000050")
+    }, error=function(e) cat("\n\n", as.character(e), "\n\n"))
+  }, res, names(res))
+)
+```
+
+### Variant abundance {.tabset .tabset-fade .tabset-pills}
+
+Show the probability function of the abundance of different combinations of variable sequences (switches).
+
+The *rug* identifies switches which are significant at FDR 1% in at least one contrasts.
+
+```{r variantAbundance}
+# melt counts
+df <- melt(counts)
+
+# add the minimal FDR at which the switch is significant in any contrast
+df <- lapply(split(df, df$L1), function(x) {        # for each pattern
+  FDRs <- do.call(cbind, lapply(res[[x$L1[1]]]$LRT, # loop over all contrasts
+                                function(res.contrast) res.contrast$table[x$Var1, "FDR", drop=FALSE]))
+  x$FDR <- apply(FDRs, 1, min)  # and return the minimum FDR of all contrasts
+  x
+})
+df <- do.call(rbind, c(df, make.row.names=FALSE))
+
+# and plot splitting by pattern
+ggplot(df, aes(x=log10(value))) +
+  geom_histogram() +
+  geom_rug(data=subset(df, FDR < .01), alpha=1/2, color="red", sides="b") +
+  ylab("Frequency") +
+  xlab("Abundance of variant (log10)") +
+  theme_bw() +
+  facet_wrap(~ L1)
+```
+
+And split by sample:
+
+```{r variantAbundance2, results='asis'}
+# and plot splitting by sample + pattern
+invisible(
+  lapply(unique(df$L1), function(pattern) {
+    x <- subset(df, L1=pattern)
+    p <- ggplot(x, aes(x=log10(value))) +
+      geom_histogram() +
+      geom_rug(data=subset(x, FDR < .01), alpha=1/2, color="red", sides="b") +
+      ylab("Frequency") +
+      xlab("Abundance of variant (log10)") +
+      theme_bw() +
+      facet_wrap(~ Var2)
+    cat("\n\n#### ", pattern, "\n\n")
+    print(p)
+  })
+)
+```
+
+### Motif logos {.tabset .tabset-fade .tabset-pills}
+
+The significant changes of variable sequences can be summarized in a motif log. We produce a position weight matrix (PWM) based on the variable sequences that are significant at an FDR of 1%.
+
+Calculate hamming distances between significant sequences, and then cluster. Define clusters of motifs as those with sequences with 75% or more identical sequence.
+
+Annotate the motifs with the maximum absolute FC of all sequences from the cluster.
+
+```{r pwm, results='asis'}
+# retrieve the sequences for each pattern+contrast
+s <- lapply(res, function(res.pattern) {
+  lapply(res.pattern$LRT, function(res.pattern.contrast) {
+    rownames(res.pattern.contrast$table)[res.pattern.contrast$table$FDR < .01]
+  })
+})
+s <- melt(s)
+
+# calculate the pwm and plot the motif
+invisible(
+  lapply(split(s, s$L1), function(x) {
+    pattern.name  <- x$L1[1]
+    cat("\n\n#### ", pattern.name, " {.tabset}\n\n")
+
+    lapply(split(x, x$L2), function(x) {
+      contrast.name <- x$L2[1]
+      cat("\n\n##### ", contrast.name, "\n\n")
+
+      if(length(x$value) <= 1) return(NULL) # nothing to cluster if 1 motifs or less
+
+      # calculate hamming distances between significant sequences and cluster
+      d <- hamming(x$value)
+      hc <- hclust(as.dist(d))
+      height <- round(nchar(gsub("_", "", x$value[1])) * .75)  # expected similarity between sequences of a cluster
+      motif.clusters <- cutree(hc, h=height)
+
+      # and plot
+      tryCatch({
+        plot(hc, cex=.5, main="")
+        rect.hclust(hc, h=height, border="red")
+      }, error=function(e){
+        cat("No clustering of motifs if 2 or less nodes")
+      })
+
+      # new fancy seqlogo plot and cluster
+      if(max(motif.clusters) >= 2) {
+        pfms <- sapply(1:max(motif.clusters), function(i) {
+          my.pcm    <- countsMat(names(motif.clusters)[motif.clusters == i])
+          my.pcm.o  <- new("pcm", mat=my.pcm, name=paste("CL", i))
+          pcm2pfm(my.pcm.o)
+        })
+
+        # calculate the max FC per cluster
+        fc <- sapply(1:max(motif.clusters), function(i) {
+          j <- names(motif.clusters)[motif.clusters == i]
+          k <- which.max(abs(res[[pattern.name]]$LRT[[contrast.name]]$table[j, ]$logFC))
+          res[[pattern.name]]$LRT[[contrast.name]]$table[j, ]$logFC[k]
+        })
+
+        # align and plot motifs
+        tryCatch({
+          plot.piled.motifs(pfms, fc)
+        }, error=function(e) {
+          cat("Not enough motifs to generate the stack plot")
+        })
+      }
+    })
+  })
+)
+```
+
+### Network analysis {.tabset .tabset-fade .tabset-pills}
+
+In the following network analysis, we join significant sequences that were at a hamming distance of only 1 (1 nucleotide change only) followed by community inference by “edge betweenness” and colored the nodes by logFC.
+
+We expect to see FC trends in communities: when a riboswitch has a big effect, do similar sequences also have it? Or the opposite: when the effect is big, do the sequences tend to _not_ form communities?
+
+```{r network, results='asis'}
+# retrieve the sequences for each pattern+contrast
+s <- lapply(res, function(res.pattern) {
+  lapply(res.pattern$LRT, function(res.pattern.contrast) {
+    i <- res.pattern.contrast$table$FDR < .01
+    data.frame(sequence=rownames(res.pattern.contrast$table)[i],
+               logFC=res.pattern.contrast$table$logFC[i])
+  })
+})
+s <- melt(s)
+
+# R> head(s)
+#   sequence variable     value                          L2         L1
+# 1  ACC_GGA    logFC 0.2739700 thiamine_100nM_vs_untreated TPP_TYPE_I
+# 2  ACG_GGC    logFC 0.2161517 thiamine_100nM_vs_untreated TPP_TYPE_I
+# 3  ACT_AGT    logFC 0.3819934 thiamine_100nM_vs_untreated TPP_TYPE_I
+# 4  ATG_GGT    logFC 0.2323451 thiamine_100nM_vs_untreated TPP_TYPE_I
+# 5  CAA_ACG    logFC 0.2935073 thiamine_100nM_vs_untreated TPP_TYPE_I
+# 6  CCA_GGC    logFC 0.2187850 thiamine_100nM_vs_untreated TPP_TYPE_I
+
+# calculate the network based on sequence distances and plot
+invisible(
+  lapply(split(s, s$L1), function(x) {
+    cat("\n\n#### ", x$L1[1], " {.tabset}\n\n")
+    lapply(split(x, x$L2), function(x) {
+      cat("\n\n##### ", x$L2[1], "\n\n")
+      plot.net.edger.results(x$sequence, x$value, main="", sub="significant motifs at FDR 1%")
+    })
+  })
+)
+```
+
+## Analysis Environment Log
+
+* Analysis directory for current report: `r getwd()`
+* Compilation time of knitr report: `r Sys.time()`
+
+```{r sessionData, include=T}
+sessionInfo()
+```
+

@@ -1,0 +1,197 @@
+---
+title: "REPORT_PROJECT"
+author: ""
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    css: report.css
+---
+
+<div class="contentbox">
+```{r setup, include=FALSE}
+options(stringsAsFactors=FALSE)
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	cache = FALSE
+)
+source("report.helpers.R")
+loadGlobalVars()
+```
+
+## Project Info
+
+### Background
+
+BACKGROUND + AIM FROM PROJECT DOCUMENT
+
+### Amplicons + Patterns
+
+#### Amplicons
+
+Amplicon:
+
+```
+5' cattgcagcgtattcccagtcccaaacaaacaaatctccttcggtacatccagctgatgagtcccaaataggacga
+aacactataatcgcgtggatatggcacgcaagnnnnnaccgggcaccgtaaatgtccgnntattgtcctggattccacg
+aaggagacaaacaaacaaagcctggtgaaattgttatccgct 3'
+```
+
+Stuffer control spike-in to be detected:
+
+```
+5' cattgcagcgtattcccagtccggaaggaagggagaaattggaatgttttaactgcagccctcagaactttagtaa
+cagcacaacaaattaaaaacaaaaacaactcatgccacagtatgtcgtcttcatgtgtcttgcaatgaactgtttcagt
+agccaatcctctttctgcctggtgaaattgttatccgct 3'
+```
+
+#### Theoretical diversity
+
+* Amplicon Name: 4^x = xxx constructs. 
+
+#### Patterns
+
+```{r patterns, results='asis'}
+patterns <- getPatternsFromConfig(RIBOSW_CFG)
+for(i in seq_along(patterns)) {
+  cat("* ", names(patterns)[i], ": ", patterns[i], sep="", fill=TRUE)
+}
+```
+
+### Data location
+
+* Demultiplexed data from flowcell located in `/data/ngsarchive/FlowCells/flowcell535_0151_170825/FASTQ/618_Riboswitch-Screen6_Kreuz_RBB-2017/`
+* raw data for R analysis located below working directory in raw\_data. Raw data generated from fastq files using the [Riboswitches pipeline](https://git.eu.boehringer.com/bibc_compbio/Riboswitches_pipeline).
+
+## QC analysis
+
+### Total matches per library
+
+Load targets file and read fastq_processor's stats output:
+
+```{r data_import}
+# read targets
+targets <- getTargetsFromConfig(RIBOSW_CFG)
+
+# read stats
+stats <- lapply(targets$filePrefix, function(f) {
+  read.delim(paste0(FASTQ_PROCESSOR_RIBOSW_OUT, "/", f, "_stats.txt"), head=F)
+})
+stats <- Reduce(function(x, y) merge(x, y, by=1), stats)
+rownames(stats) <- sub(":$", "", stats$V1)
+stats <- stats[, -1]
+colnames(stats) <- targets$sampleName
+
+# nicely show them in a table
+unmatched <- grep("^unmatched$", rownames(stats))
+total <- grep("^total$", rownames(stats))
+stats <- rbind(stats[c(-unmatched, -total), ], stats[c(unmatched, total), ])  # place these 2 cols in the end
+DT::datatable(t(stats), options=list(searching=FALSE, pageLength=25))
+```
+
+### Variant abundance
+
+Show the probability function of the abundance of different combinations of variable sequences (switches).
+
+```{r variantAbundance}
+# read counts tables
+counts <- lapply(targets$filePrefix, function(f) {
+  x <- read.delim(paste0(FASTQ_PROCESSOR_RIBOSW_OUT, "/", f, "_counts.txt"), head=F)
+  colnames(x) <- c("counts", "patternName", "VRL", "VRS")
+  x
+})
+names(counts) <- targets$sampleName
+
+# melt
+df <- melt(counts, id.vars=c("patternName", "VRL", "VRS"))
+
+# and plot splitting by sample + pattern
+invisible(
+  lapply(unique(df$patternName), function(pattern){
+    p <- ggplot(subset(df, patternName=pattern), aes(x=log10(value))) +
+      geom_histogram() +
+      ggtitle(paste("Pattern", pattern)) +
+      ylab("Frequency") +
+      xlab("Abundance of variant (log10)") +
+      theme_bw() +
+      facet_wrap(~ L1)
+    print(p)
+  })
+)
+```
+
+### Variant abundance normalized by library size
+
+Normalize abundance by millions of sequenced reads matching the patterns.
+
+```{r variantAbundanceNorm}
+# normalize
+counts <- mapply(function(x, sample) {
+  x$ncounts <- x$counts * 1e6 / stats["total", sample]
+  x
+}, counts, names(counts), SIMPLIFY=FALSE)
+
+# and plot
+df <- melt(counts, id.vars=c("patternName", "VRL", "VRS"))
+
+ggplot(subset(df, variable == "ncounts"), aes(x=L1, y=value)) +
+  geom_boxplot() +
+  scale_y_log10("log10(CPM), normalized by number of reads matched") +
+  xlab("") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, hjust=1)) +
+  facet_wrap(~ patternName)
+```
+
+### GC dependence of abundance
+
+```{r GCdependenceAbundance}
+# calculate GC content of variant
+counts <- lapply(counts, function(x) {
+  x$GC <- sapply(paste0(x$VRL, x$VRS), function(x) seqinr::GC(unlist(strsplit(x, ""))))
+  x
+})
+
+# and plot something
+df <- melt(counts, measure.vars=c("counts", "ncounts"))
+
+invisible(
+  lapply(unique(df$patternName), function(pattern){
+    x <- subset(df, variable == "ncounts" & patternName == pattern)
+    p <- ggplot(x, aes(x=GC, y=log10(value))) +
+      stat_density_2d(geom="raster", aes(fill=..density..), contour=FALSE, h=.1) +
+      scale_fill_distiller(palette="Spectral") +
+      xlim(c(0 ,1)) +
+      ggtitle(paste("Pattern", pattern)) +
+      ylab("log10(CPM), normalized by number of reads matched") +
+      xlab("GC content") +
+      theme_bw() +
+      facet_wrap(~ L1)
+    print(p)
+  })
+)
+```
+
+### Output counts matrix
+
+The matrix summarizing counts from all target samples from this project is located at `r paste0(RESULTS, "/countsQC.xlsx")`.
+
+```{r outputCountsMatrix}
+WriteXLS(counts, ExcelFileName=paste0(RESULTS, "/countsQC.xlsx"))
+kable(head(counts[[1]]))
+```
+
+## Analysis Environment Log
+
+* Analysis directory for current report: `r getwd()`
+* Compilation time of knitr report: `r Sys.time()`
+
+```{r sessionData, include=T}
+sessionInfo()
+```
+
+</div>
