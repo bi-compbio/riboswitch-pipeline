@@ -224,6 +224,7 @@ res <- Map(function(counts, patternName) {
   fit <- glmFit(y, design)	# fit model
   lrt <- apply(conts, 2, function(cont) {
     x <- glmLRT(fit, contrast=cont)
+    x$table$PValue <- ifelse(x$table$PValue < 2.2e-16, 2.2e-16, x$table$PValue)
     x$table$FDR <- p.adjust(x$table$PValue, method="fdr")
     x$table$PIscore <- PIscore(x$table$FDR, x$table$logFC)$score
     x
